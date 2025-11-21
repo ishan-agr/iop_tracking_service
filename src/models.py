@@ -87,20 +87,92 @@ class FrameMetadata(BaseModel):
         populate_by_name = True
 
 
+class MaskingLine(BaseModel):
+    """Masking line configuration for ingress/egress detection."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    direction: str  # "up" or "down" - indicates which side is ingress
+
+    def to_ingress_egress_config(self) -> IngressEgressConfig:
+        """Convert masking line format to IngressEgressConfig.
+
+        The 'direction' field indicates the ingress side:
+        - "up": ingress is above the line (vehicles moving up cross in)
+        - "down": ingress is below the line (vehicles moving down cross in)
+        """
+        # Create line from endpoints
+        line = LineConfig(
+            points=[
+                Point(x=self.x1, y=self.y1),
+                Point(x=self.x2, y=self.y2),
+            ]
+        )
+
+        # Calculate a point on the ingress side
+        # Use the midpoint of the line and offset perpendicular to it
+        mid_x = (self.x1 + self.x2) / 2
+        mid_y = (self.y1 + self.y2) / 2
+
+        # Offset distance (pixels)
+        offset = 50
+
+        # Calculate perpendicular offset based on direction
+        if self.direction.lower() == "up":
+            # Ingress is above the line (negative y direction)
+            ingress_x = mid_x
+            ingress_y = mid_y - offset
+        else:  # "down"
+            # Ingress is below the line (positive y direction)
+            ingress_x = mid_x
+            ingress_y = mid_y + offset
+
+        ingress_side_point = LineConfig(
+            points=[Point(x=ingress_x, y=ingress_y)]
+        )
+
+        return IngressEgressConfig(
+            line=line,
+            ingress_side_point=ingress_side_point
+        )
+
+
 class FrameMessage(BaseModel):
     """Input frame message from NATS."""
 
     camera_id: str = Field(alias="cameraId")
     camera_name: Optional[str] = Field(default=None, alias="cameraName")
     area_id: Optional[str] = Field(default=None, alias="areaId")
-    timestamp: str
-    data: str  # Base64 encoded frame
     model_id: Optional[str] = Field(default=None, alias="modelId")
+    timestamp: str
+    data: str  # Base64 encoded JPEG frame
+    frame_number: int = Field(alias="frameNumber")
+    requested_fps: Optional[int] = Field(default=None, alias="requestedFPS")
+
+    # Line configuration (embedded in frame message)
+    masking_line: Optional[List[MaskingLine]] = Field(default=None, alias="masking_line")
+    danger_zones: Optional[List[Any]] = Field(default=[], alias="dangerZones")
+    intrusion_lines_json: Optional[List[Any]] = Field(default=[], alias="intrusion_lines_json")
+
     metadata: Optional[FrameMetadata] = None
 
     class Config:
         populate_by_name = True
         protected_namespaces = ()
+
+    def get_line_config(self) -> Optional[IngressEgressConfig]:
+        """Extract and convert masking_line to IngressEgressConfig.
+
+        Returns:
+            IngressEgressConfig if masking_line is present, None otherwise
+        """
+        if not self.masking_line or len(self.masking_line) == 0:
+            return None
+
+        # Use the first masking line
+        return self.masking_line[0].to_ingress_egress_config()
 
 
 class BoundingBox(BaseModel):

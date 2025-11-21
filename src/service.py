@@ -11,6 +11,7 @@ from src.tracker import VehicleTrackingPipeline
 from src.config import settings
 from src.models import FrameMessage, LineConfigMessage
 from src.consumer import MultiTopicConsumer
+from src.consumer_unified import UnifiedConsumer
 from src.producer import EventProducer
 from src.minio_client import MinioClient
 from src.discord_notifier import DiscordNotifier
@@ -25,10 +26,21 @@ class TrackingService:
     def __init__(self):
         """Initialize service components."""
         self.tracker = VehicleTrackingPipeline()
-        self.consumer = MultiTopicConsumer(
-            frame_callback=self.process_frame,
-            line_config_callback=self.process_line_config,
-        )
+
+        # Choose consumer based on mode
+        if settings.nats_consumer_mode == "unified":
+            logger.info("Using unified consumer (single topic for frame + line config)")
+            self.consumer = UnifiedConsumer(
+                frame_callback=self.process_frame,
+                line_config_callback=self.process_line_config,
+            )
+        else:
+            logger.info("Using dual-topic consumer (separate frame and line config topics)")
+            self.consumer = MultiTopicConsumer(
+                frame_callback=self.process_frame,
+                line_config_callback=self.process_line_config,
+            )
+
         self.producer = EventProducer()
         self.minio_client: MinioClient = None
         self.discord = DiscordNotifier(

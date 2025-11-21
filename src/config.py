@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     )
     nats_max_pending: int = Field(default=1000, env="NATS_MAX_PENDING")
 
+    # Consumer mode: "dual" (separate frame+config topics) or "unified" (single topic with both)
+    nats_consumer_mode: str = Field(default="dual", env="NATS_CONSUMER_MODE")
+
     # Kafka configuration
     kafka_brokers: str = Field(default="localhost:9092", env="KAFKA_BROKERS")
     kafka_topic_prefix: str = Field(

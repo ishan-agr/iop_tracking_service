@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  ingress-egress-tracking-service:
+    container_name: ingress-egress-tracking-service-unified
+    image: magureai/iop-tracking-service:v1
+    environment:
+      # Service Configuration
+      SERVICE_NAME: ingress-egress-tracking-service
+      LOG_LEVEL: INFO
+
+      # API Configuration
+      API_HOST: 0.0.0.0
+      API_PORT: 8100
+
+      # NATS Configuration - UNIFIED MODE
+      NATS_URL: nats://nats:4222
+      NATS_FRAME_SUBJECT: frames.ml.vehicle_ingress_egress  # Single topic with frame + line config
+      NATS_CONSUMER_MODE: unified  # Use unified consumer
+      NATS_QUEUE_GROUP: tracking-service
+      NATS_MAX_PENDING: 1000
+
+      # Kafka Configuration
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC_PREFIX: tracking.events
+      KAFKA_LINGER_MS: 100
+
+      # MinIO Configuration
+      MINIO_BUCKET_NAME: vehicle-tracking
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+
+      # Model Configuration
+      CAR_MODEL_NAME: /app/Models/car_detection.pt
+      CAR_MODEL_CONFIDENCE: 0.6
+      CAR_MODEL_IOU_THRESHOLD: 0.4
+      MODEL_DEVICE: cuda:0
+
+      # Tracker Configuration
+      TRACKER_MAX_AGE: 120
+      TRACKER_MIN_HITS: 10
+
+      # Line Crossing Detection Parameters
+      CROSSING_DISTANCE_THRESHOLD: 20.0
+      CROSSING_CONFIRMATION_FRAMES: 3
+      CROSSING_HYSTERESIS: 5.0
+
+      # Quality Configuration
+      MIN_CROP_AREA_RATIO: 0.05
+      BLUR_THRESHOLD: 100
+      PADDING_TO_CROP: 0.1
+
+      # Save Configuration
+      SAVE_VEHICLE_CROPS: "true"
+      SAVE_CROSSING_EVENTS_ONLY: "true"
+
+      # Multi-Camera Production Settings
+      MAX_CAMERAS: 10
+      MAX_TRACKS_PER_CAMERA: 100
+      CAMERA_FRAME_TIMEOUT: 5.0
+      ENABLE_PER_CAMERA_METRICS: "true"
+
+      # Discord Notifications (optional)
+      DISCORD_ENABLED: "false"
+      # DISCORD_WEBHOOK_URL: https://discord.com/api/webhooks/YOUR_WEBHOOK
+
+      # Ultralytics config directory
+      YOLO_CONFIG_DIR: /tmp/Ultralytics
+
+      # Python unbuffered output
+      PYTHONUNBUFFERED: 1
+
+    ports:
+      - "8100:8100"
+
+    networks:
+      - magiva-vision-network
+
+    depends_on:
+      - nats
+      - kafka
+      - minio
+
+    volumes:
+      - yolo-models:/root/.cache/torch/hub
+      - tracking-data:/app/data
+      # Models are built into the image, no need to mount
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8100/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+
+networks:
+  magiva-vision-network:
+    external: true
+
+volumes:
+  yolo-models:
+  tracking-data:

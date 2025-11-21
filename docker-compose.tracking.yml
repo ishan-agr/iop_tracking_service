@@ -184,7 +184,7 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     ports:
       - "9092:9092"
-      # - "29092:29092"
+      - "29092:29092"
     volumes:
       - kafka_data:/var/lib/kafka/data
     networks:
@@ -531,3 +531,5 @@ services:
     depends_on:
         - kafka
     command: ['node', '-r', 'module-alias/register', 'build/index.js']
+
+
