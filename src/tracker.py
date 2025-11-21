@@ -345,18 +345,16 @@ class VehicleTrackingPipeline:
 
                     if crossing_result is not None:
                         direction, crossing_point = crossing_result
-                        
-                      
-                        
+
+                        # Encode full frame to base64
                         frame_base64 = None
-                        image_path = object_name 
-                            
+                        image_path = None
+
                         try:
                             is_success, buffer = cv2.imencode(".jpg", frame)
                             if is_success:
                                 frame_base64 = base64.b64encode(buffer).decode("utf-8")
-                                
-                                image_path = None
+
                                 # Save vehicle crop on crossing
                                 if settings.save_vehicle_crops:
                                     bbox_width, bbox_height = x2 - x1, y2 - y1
