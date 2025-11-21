@@ -1,6 +1,7 @@
 """Structured logging configuration."""
 
 import sys
+import logging
 import structlog
 from src.config import settings
 
@@ -14,6 +15,14 @@ def get_logger(name: str):
     Returns:
         Configured structlog logger
     """
+    # Configure standard library logging first
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    )
+
+    # Configure structlog
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -24,7 +33,7 @@ def get_logger(name: str):
             structlog.dev.ConsoleRenderer(colors=True),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
-            logging_level=settings.log_level.upper()
+            getattr(logging, settings.log_level.upper(), logging.INFO)
         ),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),

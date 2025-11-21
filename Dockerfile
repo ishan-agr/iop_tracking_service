@@ -41,6 +41,10 @@ COPY Models/ ./Models/
 # Set Python path
 ENV PYTHONPATH=/app
 
+# Fix Ultralytics config directory warning
+ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
+RUN mkdir -p /tmp/Ultralytics && chmod 777 /tmp/Ultralytics
+
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8100/health').raise_for_status()"

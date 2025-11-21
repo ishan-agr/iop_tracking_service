@@ -162,3 +162,6 @@ class ServiceStatus(BaseModel):
     active_connections: Dict[str, bool]
     model_loaded: bool
     last_error: Optional[str] = None
+
+    class Config:
+        protected_namespaces = ()

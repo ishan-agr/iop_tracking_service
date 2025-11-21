@@ -1,0 +1,533 @@
+version: '3.8'
+
+# DEVELOPMENT DOCKER COMPOSE
+# This file mounts src/ directory for live code changes without rebuilding
+
+networks:
+  magiva-vision-network:
+    name: magiva-vision-network
+    driver: bridge
+
+volumes:
+  yolo-models:
+  tracking-data:
+  zookeeper_data:
+    driver: local
+  zookeeper_logs:
+    driver: local
+  kafka_data:
+    driver: local
+  minio_data:
+    driver: local
+  auth_db_data:
+    name: ${AUTH_DB_VOLUME_NAME:-magiva-auth-db-data}
+  facility_db_data:
+    name: ${FACILITY_DB_VOLUME_NAME:-magiva-facility-db-data}
+  redis_data:
+    name: ${REDIS_VOLUME_NAME}
+
+services:
+  ingress-egress-tracking-service:
+    container_name: ingress-egress-tracking-service-dev
+    image: magureai/iop-tracking-service:v1
+    environment:
+      # Service Configuration
+      SERVICE_NAME: ingress-egress-tracking-service-dev
+      LOG_LEVEL: DEBUG  # More verbose logging for development
+
+      # API Configuration
+      API_HOST: 0.0.0.0
+      API_PORT: 8100
+
+      # NATS Configuration
+      NATS_URL: nats://nats:4222
+      NATS_FRAME_SUBJECT: frames.ml.
+      NATS_LINE_CONFIG_SUBJECT: config.tracking.lines
+      NATS_QUEUE_GROUP: tracking-service
+      NATS_MAX_PENDING: 1000
+
+      # Kafka Configuration
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_TOPIC_PREFIX: tracking.events
+      KAFKA_LINGER_MS: 100
+
+      # MinIO Configuration
+      MINIO_BUCKET_NAME: vehicle-tracking
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+
+      # Model Configuration
+      CAR_MODEL_NAME: ./Models/car_detection.pt
+      CAR_MODEL_CONFIDENCE: 0.6
+      CAR_MODEL_IOU_THRESHOLD: 0.4
+      MODEL_DEVICE: cuda:0
+
+      # Tracker Configuration
+      TRACKER_MAX_AGE: 120
+      TRACKER_MIN_HITS: 10
+
+      # Line Crossing Detection Parameters
+      CROSSING_DISTANCE_THRESHOLD: 20.0
+      CROSSING_CONFIRMATION_FRAMES: 3
+      CROSSING_HYSTERESIS: 5.0
+
+      # Quality Configuration
+      MIN_CROP_AREA_RATIO: 0.05
+      BLUR_THRESHOLD: 100
+      PADDING_TO_CROP: 0.1
+
+      # Save Configuration
+      SAVE_VEHICLE_CROPS: "true"
+      SAVE_CROSSING_EVENTS_ONLY: "true"
+
+      # Multi-Camera Production Settings
+      MAX_CAMERAS: 10
+      MAX_TRACKS_PER_CAMERA: 100
+      CAMERA_FRAME_TIMEOUT: 5.0
+      ENABLE_PER_CAMERA_METRICS: "true"
+
+      # Discord (disabled for dev)
+      DISCORD_ENABLED: "false"
+
+      # Ultralytics config directory (fix for warning)
+      YOLO_CONFIG_DIR: /tmp/Ultralytics
+
+      # Python unbuffered output (see logs immediately)
+      PYTHONUNBUFFERED: 1
+
+    ports:
+      - "8100:8100"
+
+    networks:
+      - magiva-vision-network
+
+    depends_on:
+      - nats
+      - kafka
+      - minio
+
+    volumes:
+      - yolo-models:/root/.cache/torch/hub
+      - tracking-data:/app/data
+      - ./Models:/app/Models
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8100/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+
+  # NATS server
+  nats:
+    image: nats:latest
+    container_name: nats-dev
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    networks:
+      - magiva-vision-network
+    command: ["-js", "-m", "8222"]
+    restart: unless-stopped
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: magic_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - magiva-vision-network
+    healthcheck:
+      test: [ "CMD", "bash", "-c", "echo 'srvr' | nc localhost 2181 | grep -q 'Zookeeper version'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+  # Kafka message broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: magic_kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_HOST://kafka:29092
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+      # - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - magiva-vision-network
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    
+  
+    # Kafka UI for monitoring
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: magic_kafka_ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8080:8080"
+    networks:
+      - magiva-vision-network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+  # MinIO for object storage
+  minio:
+    image: minio/minio:latest
+    container_name: magic-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - magiva-vision-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # MinIO bucket initialization
+  minio-init:
+    image: minio/mc:latest
+    container_name: magic_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    entrypoint: >
+      /bin/sh -c " /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin123; /usr/bin/mc mb myminio/magic-documents --ignore-existing; /usr/bin/mc mb myminio/magic-artifacts --ignore-existing; /usr/bin/mc mb myminio/magic-temp --ignore-existing; /usr/bin/mc anonymous set public myminio/magic-documents; exit 0; "
+    networks:
+      - magiva-vision-network
+
+  frontend:
+    image: magureai/magiva-frontend:latest
+    container_name: magiva-frontend
+    ports:
+      - "3002:8080"  # Expose on port 3002, internal nginx runs on 8080
+    networks:
+      - magiva-vision-network
+    depends_on:
+      - auth
+      - facility
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  frame-router:
+    image: magureai/magiva-frame-router-python:iop
+    container_name: magiva-frame-router
+    environment:
+      # Facility API (local container on same instance)
+      FACILITY_API_URL: ${FACILITY_API_URL}
+
+      # NATS (remote infrastructure instance)
+      NATS_URL: ${NATS_URL}
+
+      # CORS allowed origin
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN}
+
+      # Worker configuration
+      WORKER_ID: ${WORKER_ID}
+      WORKER_CAPACITY: ${WORKER_CAPACITY}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL}
+      WORKER_SHUTDOWN_TIMEOUT: ${WORKER_SHUTDOWN_TIMEOUT}
+
+      # Frame processing
+      FRAME_QUALITY: ${FRAME_QUALITY}
+      FRAME_FPS: ${FRAME_FPS}
+      FRAME_EXTRACT_TIMEOUT: ${FRAME_EXTRACT_TIMEOUT}
+      FRAME_BUFFER_SIZE: ${FRAME_BUFFER_SIZE}
+      FRAME_FORMAT: ${FRAME_FORMAT}
+
+      # Health check
+      HEALTH_PORT: ${HEALTH_PORT}
+      HEALTH_CHECK_INTERVAL: ${HEALTH_CHECK_INTERVAL}
+
+      # NATS configuration
+      NATS_MAX_RECONNECT: ${NATS_MAX_RECONNECT}
+      NATS_RECONNECT_WAIT: ${NATS_RECONNECT_WAIT}
+      NATS_MAX_PAYLOAD_MB: ${NATS_MAX_PAYLOAD_MB}
+      NATS_PUBLISH_TIMEOUT: ${NATS_PUBLISH_TIMEOUT}
+
+      # Facility API configuration
+      BACKEND_API_TIMEOUT: ${BACKEND_API_TIMEOUT}
+      BACKEND_API_RETRY_ATTEMPTS: ${BACKEND_API_RETRY_ATTEMPTS}
+      BACKEND_API_RETRY_DELAY: ${BACKEND_API_RETRY_DELAY}
+
+      # Stream Recovery Configuration
+      STREAM_RECOVERY_ENABLED: ${STREAM_RECOVERY_ENABLED}
+      STREAM_RECOVERY_CHECK_INTERVAL: ${STREAM_RECOVERY_CHECK_INTERVAL}
+      STREAM_RECOVERY_FRAME_TIMEOUT: ${STREAM_RECOVERY_FRAME_TIMEOUT}
+      STREAM_RECOVERY_MIN_FRAMES_IN_WINDOW: ${STREAM_RECOVERY_MIN_FRAMES_IN_WINDOW}
+      STREAM_RECOVERY_MAX_ATTEMPTS: ${STREAM_RECOVERY_MAX_ATTEMPTS}
+      STREAM_RECOVERY_COOLDOWN_SECONDS: ${STREAM_RECOVERY_COOLDOWN_SECONDS}
+      STREAM_RECOVERY_WINDOW_MINUTES: ${STREAM_RECOVERY_WINDOW_MINUTES}
+
+      # Stream Retry Configuration
+      STREAM_RETRY_INTERVAL: ${STREAM_RETRY_INTERVAL}
+      STREAM_MAX_CONSECUTIVE_FAILURES: ${STREAM_MAX_CONSECUTIVE_FAILURES}
+      STREAM_RECONNECT_TIMEOUT: ${STREAM_RECONNECT_TIMEOUT}
+      STREAM_HEALTH_CHECK_INTERVAL: ${STREAM_HEALTH_CHECK_INTERVAL}
+
+      # Stream Health Monitoring
+      STREAM_HEALTH_FRAME_TIMEOUT: ${STREAM_HEALTH_FRAME_TIMEOUT}
+      STREAM_HEALTH_FIRST_FRAME_TIMEOUT: ${STREAM_HEALTH_FIRST_FRAME_TIMEOUT}
+      STREAM_HEALTH_MIN_ACCEPTABLE_FPS: ${STREAM_HEALTH_MIN_ACCEPTABLE_FPS}
+      STREAM_HEALTH_MAX_DUPLICATE_FRAMES: ${STREAM_HEALTH_MAX_DUPLICATE_FRAMES}
+      STREAM_HEALTH_FPS_CHECK_WINDOW: ${STREAM_HEALTH_FPS_CHECK_WINDOW}
+      STREAM_HEALTH_WATCHDOG_INTERVAL: ${STREAM_HEALTH_WATCHDOG_INTERVAL}
+      STREAM_HEALTH_STATS_LOG_INTERVAL: ${STREAM_HEALTH_STATS_LOG_INTERVAL}
+
+      # Discord Notifications
+      DISCORD_ENABLED: ${DISCORD_ENABLED}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+      DISCORD_USERNAME: ${DISCORD_USERNAME}
+      DISCORD_AVATAR_URL: ${DISCORD_AVATAR_URL}
+      DISCORD_RATE_LIMIT_SECONDS: ${DISCORD_RATE_LIMIT_SECONDS}
+      DISCORD_MAX_RETRIES: ${DISCORD_MAX_RETRIES}
+      DISCORD_NOTIFY_RECOVERY_TRIGGERED: ${DISCORD_NOTIFY_RECOVERY_TRIGGERED}
+      DISCORD_NOTIFY_RECOVERY_SUCCESS: ${DISCORD_NOTIFY_RECOVERY_SUCCESS}
+      DISCORD_NOTIFY_RECOVERY_FAILED: ${DISCORD_NOTIFY_RECOVERY_FAILED}
+      DISCORD_NOTIFY_MAX_ATTEMPTS: ${DISCORD_NOTIFY_MAX_ATTEMPTS}
+      DISCORD_NOTIFY_FRAME_TIMEOUT: ${DISCORD_NOTIFY_FRAME_TIMEOUT}
+      DISCORD_NOTIFY_FROZEN_CAMERA: ${DISCORD_NOTIFY_FROZEN_CAMERA}
+      DISCORD_NOTIFY_CONNECTION_LOST: ${DISCORD_NOTIFY_CONNECTION_LOST}
+
+      # Playground configuration
+      PLAYGROUND_MAX_FPS: ${PLAYGROUND_MAX_FPS}
+      PLAYGROUND_DEFAULT_FPS: ${PLAYGROUND_DEFAULT_FPS}
+      PLAYGROUND_JPEG_QUALITY: ${PLAYGROUND_JPEG_QUALITY}
+      PLAYGROUND_MAX_VIDEO_DURATION: ${PLAYGROUND_MAX_VIDEO_DURATION}
+
+      # MinIO configuration
+      MINIO_ENDPOINT_URL: http://${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET_NAME: playground-videos
+      MINIO_USE_SSL: ${MINIO_SECURE}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL}
+    networks:
+       - magiva-vision-network
+    ports:
+      - "8383:8383"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8383/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  facility-db:
+    image: postgis/postgis:14-3.3
+    container_name: ${FACILITY_DB_CONTAINER_NAME:-magiva-facility-db}
+    environment:
+      POSTGRES_DB: ${FACILITY_DB_NAME}
+      POSTGRES_USER: ${FACILITY_DB_USER}
+      POSTGRES_PASSWORD: ${FACILITY_DB_PASSWORD}
+    ports:
+      - "${FACILITY_DB_PORT:-5433}:5432"
+    volumes:
+      - facility_db_data:/var/lib/postgresql/data
+    networks:
+      - magiva-vision-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FACILITY_DB_USER} -d ${FACILITY_DB_NAME}"]
+      interval: ${FACILITY_DB_HEALTH_INTERVAL:-10s}
+      timeout: ${FACILITY_DB_HEALTH_TIMEOUT:-5s}
+      retries: ${FACILITY_DB_HEALTH_RETRIES:-5}
+    restart: unless-stopped
+
+  auth-db:
+    image: postgres:14
+    container_name: ${AUTH_DB_CONTAINER_NAME:-magiva-auth-db}
+    environment:
+      POSTGRES_DB: ${AUTH_DB_NAME}
+      POSTGRES_USER: ${AUTH_DB_USER}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    ports:
+      - "127.0.0.1:${AUTH_DB_PORT:-5432}:5432"
+    volumes:
+      - auth_db_data:/var/lib/postgresql/data
+    networks:
+      - magiva-vision-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_DB_USER} -d ${AUTH_DB_NAME}"]
+      interval: ${AUTH_DB_HEALTH_INTERVAL:-10s}
+      timeout: ${AUTH_DB_HEALTH_TIMEOUT:-5s}
+      retries: ${AUTH_DB_HEALTH_RETRIES:-5}
+    restart: unless-stopped
+
+  auth:
+    image: magureai/magiva-auth-service:auth-v3
+    container_name: magiva-auth
+    environment:
+      - DATABASE_HOST=${AUTH_DB_HOST}
+      - DATABASE_PORT=${AUTH_DB_PORT}
+      - DATABASE_NAME=${AUTH_DB_NAME}
+      - DATABASE_USERNAME=${AUTH_DB_USER}
+      - DATABASE_PASSWORD=${AUTH_DB_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET_FE}
+      - NODE_ENV=${NODE_ENV}
+    depends_on:
+      - auth-db
+    networks:
+      - magiva-vision-network
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  # Facility Service
+  facility:
+    image: magureai/magiva-facility-service:latest
+    container_name: magiva-facility
+    environment:
+      - DATABASE_URL=${FACILITY_DATABASE_URL}
+      - DATABASE_HOST=${FACILITY_DB_HOST}
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${FACILITY_DB_NAME}
+      - DATABASE_USERNAME=${FACILITY_DB_USER}
+      - DATABASE_PASSWORD=${FACILITY_DB_PASSWORD}
+      - REDIS_URL=${REDIS_URL}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - NATS_URL=${NATS_URL}
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGIN=${CORS_ORIGIN}
+    depends_on:
+      - facility-db
+    networks:
+      - magiva-vision-network
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+ 
+  redis:
+    image: ${REDIS_IMAGE}
+    container_name: ${REDIS_CONTAINER_NAME}
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - magiva-vision-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "ping"]
+      interval: ${REDIS_HEALTH_INTERVAL}
+      timeout: ${REDIS_HEALTH_TIMEOUT}
+      retries: ${REDIS_HEALTH_RETRIES}
+    restart: unless-stopped
+
+  iop-backend-service:
+    image: magureai/icons_of_porsche_ml-be-service:track
+    container_name: icons-of-porsche-be
+    ports:
+        - '8823:8823'
+    environment:
+        NODE_ENV: production
+        APP_PORT: 8823
+        SERVER_HOST: 136.119.107.99
+        SERVER_URL: http://136.119.107.99:8823
+        SERVER_LOG_LEVEL: debug
+
+        # Postgres Database
+        PG_HOST: ep-blue-math-ad7bcwjw-pooler.c-2.us-east-1.aws.neon.tech
+        PG_DATABASE_NAME: neondb
+        PG_USER: neondb_owner
+        PG_PASSWORD: npg_F6EPKZJ0DUXm
+        PG_PORT: 5432
+
+        # API Rate Limiter
+        RATE_LIMIT_MAX: 200
+        RATE_LIMIT_WINDOW_MS: 900000
+
+        # JWT
+        JWT_SECRET: myjwtkey
+
+        # Kafka
+        KAFKA_BROKER: kafka:9092
+        KAFKA_TOPIC: inference.results.track
+        KAFKA_GROUP_ID: icons-of-porsche-group-track
+        KAFKAJS_NO_PARTITIONER_WARNING: 1
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        BATCH_SIZE: 10
+        HISTORICAL_RECORDS_HOURS: 24
+        MAX_SESSION_MINUTES: 3
+
+    depends_on:
+        - kafka
+    command: ['node', '-r', 'module-alias/register', 'build/index.js']

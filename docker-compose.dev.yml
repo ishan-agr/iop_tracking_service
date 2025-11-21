@@ -1,5 +1,8 @@
 version: '3.8'
 
+# DEVELOPMENT DOCKER COMPOSE
+# This file mounts src/ directory for live code changes without rebuilding
+
 networks:
   magiva-vision-network:
     name: magiva-vision-network
@@ -8,19 +11,25 @@ networks:
 volumes:
   yolo-models:
   tracking-data:
+  zookeeper_data:
+    driver: local
+  zookeeper_logs:
+    driver: local
   kafka_data:
+    driver: local
+  minio_data:
+    driver: local
 
 services:
   ingress-egress-tracking-service:
-    container_name: ingress-egress-tracking-service
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile
-    image: magureai/iop_tracking_service:v1               
+    container_name: ingress-egress-tracking-service-dev
+    build:
+      context: .
+      dockerfile: Dockerfile
     environment:
       # Service Configuration
-      SERVICE_NAME: ingress-egress-tracking-service
-      LOG_LEVEL: INFO
+      SERVICE_NAME: ingress-egress-tracking-service-dev
+      LOG_LEVEL: DEBUG  # More verbose logging for development
 
       # API Configuration
       API_HOST: 0.0.0.0
@@ -74,6 +83,15 @@ services:
       CAMERA_FRAME_TIMEOUT: 5.0
       ENABLE_PER_CAMERA_METRICS: "true"
 
+      # Discord (disabled for dev)
+      DISCORD_ENABLED: "false"
+
+      # Ultralytics config directory (fix for warning)
+      YOLO_CONFIG_DIR: /tmp/Ultralytics
+
+      # Python unbuffered output (see logs immediately)
+      PYTHONUNBUFFERED: 1
+
     ports:
       - "8100:8100"
 
@@ -86,9 +104,18 @@ services:
       - minio
 
     volumes:
+      # ⭐ MOUNT SOURCE CODE FOR LIVE CHANGES
+      - ./src:/app/src:rw
+
+      # Mount models (read-only)
+      - ./Models:/app/Models:ro
+
+      # Cache directories
       - yolo-models:/root/.cache/torch/hub
       - tracking-data:/app/data
-      - ./Models:/app/Models
+
+      # Ultralytics config (fix warning)
+      - /tmp/Ultralytics:/tmp/Ultralytics
 
     restart: unless-stopped
 
@@ -107,10 +134,10 @@ services:
               count: all
               capabilities: ["gpu"]
 
-  # NATS server (if not already running)
+  # NATS server
   nats:
     image: nats:latest
-    container_name: nats
+    container_name: nats-dev
     ports:
       - "4222:4222"
       - "8222:8222"
@@ -119,17 +146,32 @@ services:
     command: ["-js", "-m", "8222"]
     restart: unless-stopped
 
-  # Kafka and Zookeeper (if not already running)
   zookeeper:
-    image: confluentinc/cp-zookeeper:latest
-    container_name: zookeeper
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: magic_zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
     networks:
       - magiva-vision-network
-    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "bash", "-c", "echo 'srvr' | nc localhost 2181 | grep -q 'Zookeeper version'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+  # Kafka message broker
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: magic_kafka
@@ -139,6 +181,7 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_HOST://kafka:29092
 
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
@@ -163,28 +206,69 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
-
-
-  # MinIO object storage (if not already running)
+    
+  
+    # Kafka UI for monitoring
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: magic_kafka_ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8080:8080"
+    networks:
+      - magiva-vision-network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+  # MinIO for object storage
   minio:
     image: minio/minio:latest
-    container_name: minio
+    container_name: magic-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
     ports:
       - "9000:9000"
       - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin123
     volumes:
-      - tracking-data:/data
+      - minio_data:/data
     networks:
       - magiva-vision-network
-    command: server /data --console-address ":9001"
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # MinIO bucket initialization
+  minio-init:
+    image: minio/mc:latest
+    container_name: magic_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    entrypoint: >
+      /bin/sh -c " /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin123; /usr/bin/mc mb myminio/magic-documents --ignore-existing; /usr/bin/mc mb myminio/magic-artifacts --ignore-existing; /usr/bin/mc mb myminio/magic-temp --ignore-existing; /usr/bin/mc anonymous set public myminio/magic-documents; exit 0; "
+    networks:
+      - magiva-vision-network
 
   
