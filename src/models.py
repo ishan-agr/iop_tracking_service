@@ -220,7 +220,7 @@ class CrossingEvent(BaseModel):
     crossing_point: Point
     frame_number: int
     image_path: Optional[str] = None 
-    frame_base64: Optional[str] = None
+   
 
 
 class ServiceStatus(BaseModel):

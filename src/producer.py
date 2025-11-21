@@ -87,8 +87,8 @@ class EventProducer:
                     "y": event.crossing_point.y,
                 },
                 "frameNumber": event.frame_number,
-                "imagePath": event.image_path,
-                "frameImage": event.frame_base64, 
+                "imagePath": event.image_path, #event.image_path is image base64
+                
             }
 
             message_bytes = json.dumps(message).encode("utf-8")

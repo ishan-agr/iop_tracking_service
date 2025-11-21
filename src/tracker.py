@@ -393,8 +393,7 @@ class VehicleTrackingPipeline:
                             bbox=BoundingBox(x=x1, y=y1, width=x2 - x1, height=y2 - y1),
                             crossing_point=crossing_point,
                             frame_number=frame_number,
-                            image_path=image_path,
-                            frame_base64=frame_base64
+                            image_path=frame_base64,
                         )
                         crossing_events.append(crossing_event)
 
