@@ -88,39 +88,88 @@ class FrameMetadata(BaseModel):
 
 
 class MaskingLine(BaseModel):
-    """Masking line configuration for ingress/egress detection."""
+    """Masking line configuration for ingress/egress detection.
 
-    x1: float
-    y1: float
-    x2: float
-    y2: float
-    direction: str  # "up" or "down" - indicates which side is ingress
+    Accepts both formats:
+    1. Flat format: x1, y1, x2, y2, direction
+    2. Points array format: points array (from frame router)
+    """
 
-    def to_ingress_egress_config(self) -> IngressEgressConfig:
+    # Flat format (original)
+    x1: Optional[float] = None
+    y1: Optional[float] = None
+    x2: Optional[float] = None
+    y2: Optional[float] = None
+    direction: Optional[str] = None  # "up" or "down" - indicates which side is ingress
+
+    # Points array format (from frame router)
+    points: Optional[List[Point]] = None
+
+    def to_ingress_egress_config(self, frame_width: int, frame_height: int) -> IngressEgressConfig:
         """Convert masking line format to IngressEgressConfig.
+
+        Supports two input formats:
+        1. Flat format: x1, y1, x2, y2, direction fields
+        2. Points array format: points array with 2 points for line
 
         The 'direction' field indicates the ingress side:
         - "up": ingress is above the line (vehicles moving up cross in)
         - "down": ingress is below the line (vehicles moving down cross in)
+
+        Args:
+            frame_width: Frame width in pixels (for percentage conversion)
+            frame_height: Frame height in pixels (for percentage conversion)
         """
-        # Create line from endpoints
+        # Handle points array format (from frame router)
+        if self.points is not None and len(self.points) >= 2:
+            # Extract coordinates from points array
+            x1 = self.points[0].x
+            y1 = self.points[0].y
+            x2 = self.points[1].x
+            y2 = self.points[1].y
+
+        # Handle flat format (original)
+        elif self.x1 is not None and self.y1 is not None and self.x2 is not None and self.y2 is not None:
+            x1, y1, x2, y2 = self.x1, self.y1, self.x2, self.y2
+        else:
+            raise ValueError("MaskingLine must have either 'points' array or x1/y1/x2/y2 fields")
+
+        # Determine if coordinates are percentage (0-100) or pixel values
+        # If all coordinates are <= 100, assume percentage coordinates
+        is_percentage = all(coord <= 100 for coord in [x1, y1, x2, y2])
+
+        # Convert percentage to pixels
+        if is_percentage:
+            x1_px = int(frame_width * x1 / 100)
+            y1_px = int(frame_height * y1 / 100)
+            x2_px = int(frame_width * x2 / 100)
+            y2_px = int(frame_height * y2 / 100)
+            offset = 50.0  # Use pixel offset
+        else:
+            # Already in pixels
+            x1_px = int(x1)
+            y1_px = int(y1)
+            x2_px = int(x2)
+            y2_px = int(y2)
+            offset = 50.0
+
+        # Create line from pixel coordinates
         line = LineConfig(
             points=[
-                Point(x=self.x1, y=self.y1),
-                Point(x=self.x2, y=self.y2),
+                Point(x=float(x1_px), y=float(y1_px)),
+                Point(x=float(x2_px), y=float(y2_px)),
             ]
         )
 
-        # Calculate a point on the ingress side
-        # Use the midpoint of the line and offset perpendicular to it
-        mid_x = (self.x1 + self.x2) / 2
-        mid_y = (self.y1 + self.y2) / 2
-
-        # Offset distance (pixels)
-        offset = 50
+        # Calculate ingress point using pixel coordinates
+        mid_x = (x1_px + x2_px) / 2
+        mid_y = (y1_px + y2_px) / 2
 
         # Calculate perpendicular offset based on direction
-        if self.direction.lower() == "up":
+        # Default to "down" if direction is not specified
+        direction = self.direction or "down"
+
+        if direction.lower() == "up":
             # Ingress is above the line (negative y direction)
             ingress_x = mid_x
             ingress_y = mid_y - offset
@@ -165,14 +214,72 @@ class FrameMessage(BaseModel):
     def get_line_config(self) -> Optional[IngressEgressConfig]:
         """Extract and convert masking_line to IngressEgressConfig.
 
+        Supports two formats:
+        1. Full config: [line with 2 points, ingress_side_point with 1 point]
+        2. Single line with direction: [line with 2 points + direction field]
+
         Returns:
             IngressEgressConfig if masking_line is present, None otherwise
         """
         if not self.masking_line or len(self.masking_line) == 0:
             return None
 
-        # Use the first masking line
-        return self.masking_line[0].to_ingress_egress_config()
+        # Get frame dimensions from metadata
+        if not self.metadata:
+            from src.logger import get_logger
+            logger = get_logger(__name__)
+            logger.warning("No metadata available for coordinate conversion")
+            return None
+
+        # Check if we have a full config (2 elements: line + ingress point)
+        if len(self.masking_line) == 2:
+            line_element = self.masking_line[0]
+            ingress_element = self.masking_line[1]
+
+            # Validate structure: first has 2 points, second has 1 point
+            if (line_element.points and len(line_element.points) == 2 and
+                ingress_element.points and len(ingress_element.points) == 1):
+
+                # Convert percentage to pixels for both elements
+                frame_width = self.metadata.width
+                frame_height = self.metadata.height
+
+                # Convert line points
+                x1, y1 = line_element.points[0].x, line_element.points[0].y
+                x2, y2 = line_element.points[1].x, line_element.points[1].y
+                is_percentage = all(coord <= 100 for coord in [x1, y1, x2, y2])
+
+                if is_percentage:
+                    line_points = [
+                        Point(x=frame_width * x1 / 100, y=frame_height * y1 / 100),
+                        Point(x=frame_width * x2 / 100, y=frame_height * y2 / 100)
+                    ]
+                else:
+                    line_points = line_element.points
+
+                # Convert ingress point
+                ing_x, ing_y = ingress_element.points[0].x, ingress_element.points[0].y
+                if ing_x <= 100 and ing_y <= 100:  # Assume percentage
+                    ingress_points = [
+                        Point(x=frame_width * ing_x / 100, y=frame_height * ing_y / 100)
+                    ]
+                else:
+                    ingress_points = ingress_element.points
+
+                # Create IngressEgressConfig directly
+                line = LineConfig(points=line_points)
+                ingress_side_point = LineConfig(points=ingress_points)
+
+                return IngressEgressConfig(
+                    line=line,
+                    ingress_side_point=ingress_side_point
+                )
+
+        # Fallback: Single line with direction - calculate ingress point
+        return self.masking_line[0].to_ingress_egress_config(
+            frame_width=self.metadata.width,
+            frame_height=self.metadata.height
+        )
 
 
 class BoundingBox(BaseModel):

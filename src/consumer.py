@@ -101,6 +101,14 @@ class MultiTopicConsumer:
             data = json.loads(msg.data.decode())
             frame_msg = FrameMessage(**data)
 
+            # Log RAW masking_line if present (for debugging)
+            if frame_msg.masking_line is not None:
+                logger.debug(
+                    "📥 Frame received with masking_line",
+                    camera_id=frame_msg.camera_id,
+                    raw_masking_line=frame_msg.masking_line
+                )
+
             # Process frame
             await self.frame_callback(frame_msg)
 

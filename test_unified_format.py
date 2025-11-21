@@ -21,7 +21,7 @@ try:
 except ImportError:
     print("❌ Missing dependencies. Installing...")
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "nats-py", "aiokafka"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "nats-py", "aiokafka", "opencv-python"])
     import nats
     from aiokafka import AIOKafkaConsumer
 
@@ -52,19 +52,27 @@ class UnifiedFormatTester:
     async def connect(self):
         """Connect to NATS and Kafka."""
         print(f"🔌 Connecting to NATS at {self.nats_url}...")
-        self.nc = await nats.connect(self.nats_url)
-        print("✅ Connected to NATS")
+        try:
+            self.nc = await nats.connect(self.nats_url)
+            print("✅ Connected to NATS")
+        except Exception as e:
+            print(f"❌ Failed to connect to NATS: {e}")
+            raise
 
         print(f"🔌 Connecting to Kafka at {self.kafka_brokers}...")
-        self.kafka_consumer = AIOKafkaConsumer(
-            f"tracking.events.{self.camera_id}",
-            bootstrap_servers=self.kafka_brokers,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-            auto_offset_reset="latest",
-            enable_auto_commit=True,
-        )
-        await self.kafka_consumer.start()
-        print("✅ Connected to Kafka")
+        try:
+            self.kafka_consumer = AIOKafkaConsumer(
+                f"tracking.events.{self.camera_id}",
+                bootstrap_servers=self.kafka_brokers,
+                value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+                auto_offset_reset="latest",
+                enable_auto_commit=True,
+            )
+            await self.kafka_consumer.start()
+            print("✅ Connected to Kafka")
+        except Exception as e:
+            print(f"❌ Failed to connect to Kafka: {e}")
+            raise
 
     async def send_frame(self, frame, frame_number: int, include_line_config: bool = False):
         """Send a single frame to NATS in unified format.
@@ -105,16 +113,16 @@ class UnifiedFormatTester:
             },
         }
 
-        # Add masking line configuration
+        # Add masking line configuration (PERCENTAGE format 0-100)
         if include_line_config:
             # Horizontal line across the middle of the frame
-            y_middle = height // 2
+            # Using PERCENTAGE coordinates (0-100), not pixels!
             message["masking_line"] = [
                 {
-                    "x1": float(width * 0.2),
-                    "y1": float(y_middle),
-                    "x2": float(width * 0.8),
-                    "y2": float(y_middle),
+                    "x1": 20.0,   # 20% from left
+                    "y1": 50.0,   # 50% from top (middle)
+                    "x2": 80.0,   # 80% from left
+                    "y2": 50.0,   # 50% from top (horizontal line)
                     "direction": "up",  # Ingress is above the line
                 }
             ]
@@ -234,10 +242,14 @@ class UnifiedFormatTester:
                     print(
                         f"\n✅ Frame {frame_number}: Sent with line configuration"
                     )
+                    print(f"   Format: PERCENTAGE coordinates (0-100)")
                     print(
-                        f"   Line: ({line_info['x1']:.0f}, {line_info['y1']:.0f}) → ({line_info['x2']:.0f}, {line_info['y2']:.0f})"
+                        f"   Line: ({line_info['x1']:.1f}%, {line_info['y1']:.1f}%) → ({line_info['x2']:.1f}%, {line_info['y2']:.1f}%)"
                     )
                     print(f"   Direction: {line_info['direction']}")
+                    print(
+                        f"   Expected pixels: ({width * line_info['x1'] / 100:.0f}, {height * line_info['y1'] / 100:.0f}) → ({width * line_info['x2'] / 100:.0f}, {height * line_info['y2'] / 100:.0f})"
+                    )
                     print()
                 else:
                     if frames_sent % 10 == 0:
@@ -276,7 +288,14 @@ class UnifiedFormatTester:
             print("   - No vehicles crossed the line")
             print("   - Line position needs adjustment")
             print("   - Service not running in unified mode")
+            print("   - Metadata missing (needed for coordinate conversion)")
             print("   - Check service logs for errors")
+            print()
+            print("   💡 Troubleshooting:")
+            print("   - Verify service is running")
+            print("   - Check service logs for conversion errors")
+            print("   - Confirm NATS/Kafka connections are working")
+            print("   - Verify masking_line format is correct (x1, y1, x2, y2, direction)")
             return
 
         # Count events
@@ -293,14 +312,16 @@ class UnifiedFormatTester:
         print(f"   Unique Vehicles: {unique_tracks}")
 
         print("\n   📋 Event List:")
-        print(f"      {'Frame':<8} {'Track':<8} {'Direction':<10} {'Value':<6}")
-        print(f"      {'-'*8} {'-'*8} {'-'*10} {'-'*6}")
+        print(f"      {'Frame':<8} {'Track':<8} {'Direction':<10} {'Value':<6} {'Crossing Point':<20}")
+        print(f"      {'-'*8} {'-'*8} {'-'*10} {'-'*6} {'-'*20}")
         for event in self.crossing_events[:20]:  # Show first 20
             frame = event.get("frameNumber", 0)
             track = event.get("trackId", 0)
             direction = event.get("direction", "unknown")
             value = event.get("directionValue", 0)
-            print(f"      {frame:<8} {track:<8} {direction:<10} {value:+d}")
+            cp = event.get("crossingPoint", {})
+            cp_str = f"({cp.get('x', 0):.1f}, {cp.get('y', 0):.1f})"
+            print(f"      {frame:<8} {track:<8} {direction:<10} {value:+d}     {cp_str}")
 
         if len(self.crossing_events) > 20:
             print(f"      ... and {len(self.crossing_events) - 20} more events")
@@ -326,21 +347,29 @@ async def main():
     print("frame data and line configuration are sent in a single message.")
     print()
 
-    # Configuration
-    video_path = r"C:\Users\ishan\Downloads\ingress_outgress_car.mp4"
-    camera_id = "cam-entrance-001"
-    camera_name = "Main Entrance Gate"
-    area_id = "parking-lot-a"
+    # Configuration - UPDATE THESE FOR YOUR ENVIRONMENT
+    video_path = "test_video.mp4"  # Path to your test video
+    camera_id = "camera13"
+    camera_name = "Main Entrance Camera"
+    area_id = "area-uuid-123"
+    nats_url = "nats://localhost:4222"      # Change if NATS is on different host
+    kafka_brokers = "localhost:9092"        # Change if Kafka is on different host
 
     # Allow command line override
     if len(sys.argv) > 1:
         video_path = sys.argv[1]
     if len(sys.argv) > 2:
         camera_id = sys.argv[2]
+    if len(sys.argv) > 3:
+        nats_url = sys.argv[3]
+    if len(sys.argv) > 4:
+        kafka_brokers = sys.argv[4]
 
     print(f"📹 Video: {video_path}")
     print(f"📷 Camera: {camera_id} ({camera_name})")
     print(f"📍 Area: {area_id}")
+    print(f"🔌 NATS: {nats_url}")
+    print(f"🔌 Kafka: {kafka_brokers}")
     print()
 
     # Check video exists
@@ -348,10 +377,12 @@ async def main():
         print(f"❌ Error: Video not found: {video_path}")
         print()
         print("Usage:")
-        print(f"  python {Path(__file__).name} [video_path] [camera_id]")
+        print(f"  python {Path(__file__).name} <video_path> [camera_id] [nats_url] [kafka_brokers]")
         print()
         print("Example:")
+        print(f"  python {Path(__file__).name} test.mp4")
         print(f"  python {Path(__file__).name} test.mp4 cam-01")
+        print(f"  python {Path(__file__).name} test.mp4 cam-01 nats://localhost:4222 localhost:9092")
         return 1
 
     # Create tester
@@ -360,8 +391,8 @@ async def main():
         camera_id=camera_id,
         camera_name=camera_name,
         area_id=area_id,
-        nats_url="nats://localhost:4222",
-        kafka_brokers="localhost:9092",
+        nats_url=nats_url,
+        kafka_brokers=kafka_brokers,
     )
 
     try:
