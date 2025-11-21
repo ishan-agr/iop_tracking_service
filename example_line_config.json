@@ -1,0 +1,28 @@
+{
+  "cameraId": "camera-entrance-01",
+  "cameraName": "Main Entrance",
+  "areaId": "parking-area-A",
+  "timestamp": "2025-11-20T10:00:00Z",
+  "config": [
+    {
+      "points": [
+        {
+          "x": 14.0625,
+          "y": 68.16731770833333
+        },
+        {
+          "x": 83.4375,
+          "y": 74.208984375
+        }
+      ]
+    },
+    {
+      "points": [
+        {
+          "x": 43.462412353338266,
+          "y": 78.75794977634649
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+version: '3.8'
+
+networks:
+  magiva-vision-network:
+    name: magiva-vision-network
+    driver: bridge
+
+volumes:
+  yolo-models:
+  tracking-data:
+
+services:
+  ingress-egress-tracking-service:
+    container_name: ingress-egress-tracking-service
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: magureai/iop_tracking_service:v1               
+    environment:
+      # Service Configuration
+      SERVICE_NAME: ingress-egress-tracking-service
+      LOG_LEVEL: INFO
+
+      # API Configuration
+      API_HOST: 0.0.0.0
+      API_PORT: 8100
+
+      # NATS Configuration
+      NATS_URL: nats://nats:4222
+      NATS_FRAME_SUBJECT: frames.ml.tracking
+      NATS_LINE_CONFIG_SUBJECT: config.tracking.lines
+      NATS_QUEUE_GROUP: tracking-service
+      NATS_MAX_PENDING: 1000
+
+      # Kafka Configuration
+      KAFKA_BROKERS: "kafka:29092"
+      KAFKA_TOPIC_PREFIX: tracking.events
+      KAFKA_LINGER_MS: 100
+
+      # MinIO Configuration
+      MINIO_BUCKET_NAME: vehicle-tracking
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+
+      # Model Configuration
+      CAR_MODEL_NAME: ./Models/car_detection.pt
+      CAR_MODEL_CONFIDENCE: 0.6
+      CAR_MODEL_IOU_THRESHOLD: 0.4
+      MODEL_DEVICE: cuda:0
+
+      # Tracker Configuration
+      TRACKER_MAX_AGE: 120
+      TRACKER_MIN_HITS: 10
+
+      # Line Crossing Detection Parameters
+      CROSSING_DISTANCE_THRESHOLD: 20.0
+      CROSSING_CONFIRMATION_FRAMES: 3
+      CROSSING_HYSTERESIS: 5.0
+
+      # Quality Configuration
+      MIN_CROP_AREA_RATIO: 0.05
+      BLUR_THRESHOLD: 100
+      PADDING_TO_CROP: 0.1
+
+      # Save Configuration
+      SAVE_VEHICLE_CROPS: "true"
+      SAVE_CROSSING_EVENTS_ONLY: "true"
+
+      # Multi-Camera Production Settings
+      MAX_CAMERAS: 10
+      MAX_TRACKS_PER_CAMERA: 100
+      CAMERA_FRAME_TIMEOUT: 5.0
+      ENABLE_PER_CAMERA_METRICS: "true"
+
+    ports:
+      - "8100:8100"
+
+    networks:
+      - magiva-vision-network
+
+    depends_on:
+      - nats
+      - kafka
+      - minio
+
+    volumes:
+      - yolo-models:/root/.cache/torch/hub
+      - tracking-data:/app/data
+      - ./Models:/app/Models
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8100/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+
+  # NATS server (if not already running)
+  nats:
+    image: nats:latest
+    container_name: nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    networks:
+      - magiva-vision-network
+    command: ["-js", "-m", "8222"]
+    restart: unless-stopped
+
+  # Kafka and Zookeeper (if not already running)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - magiva-vision-network
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - magiva-vision-network
+    restart: unless-stopped
+
+  # MinIO object storage (if not already running)
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - tracking-data:/data
+    networks:
+      - magiva-vision-network
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
