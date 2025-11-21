@@ -48,6 +48,11 @@ class VehicleTrackingPipeline:
         # Camera metadata (camera_name, area_id)
         self.camera_metadata: Dict[str, Dict[str, str]] = {}
 
+        # FPS tracking per camera for adaptive parameters
+        self.camera_fps_history: Dict[str, List[float]] = {}
+        self.camera_last_timestamp: Dict[str, float] = {}
+        self.fps_history_size = 30  # Track last 30 frames for FPS calculation
+
         # Quality thresholds
         self.min_crop_area_ratio = settings.min_crop_area_ratio
         self.blur_threshold = settings.blur_threshold
@@ -81,6 +86,89 @@ class VehicleTrackingPipeline:
             logger.error("Failed to load vehicle detection model", error=str(e))
             raise
 
+    def update_fps_tracking(self, camera_id: str) -> Optional[float]:
+        """Update FPS tracking for a camera and return current estimated FPS.
+
+        Args:
+            camera_id: Camera identifier
+
+        Returns:
+            Estimated FPS or None if not enough data
+        """
+        current_time = time.time()
+
+        # Initialize tracking for new camera
+        if camera_id not in self.camera_fps_history:
+            self.camera_fps_history[camera_id] = []
+            self.camera_last_timestamp[camera_id] = current_time
+            return None
+
+        # Calculate time delta since last frame
+        last_time = self.camera_last_timestamp[camera_id]
+        delta_t = current_time - last_time
+
+        if delta_t > 0:
+            # Calculate instantaneous FPS
+            instant_fps = 1.0 / delta_t
+
+            # Add to history
+            self.camera_fps_history[camera_id].append(instant_fps)
+
+            # Keep only recent history
+            if len(self.camera_fps_history[camera_id]) > self.fps_history_size:
+                self.camera_fps_history[camera_id].pop(0)
+
+        # Update timestamp
+        self.camera_last_timestamp[camera_id] = current_time
+
+        # Return average FPS if we have enough samples
+        if len(self.camera_fps_history[camera_id]) >= 5:
+            avg_fps = sum(self.camera_fps_history[camera_id]) / len(
+                self.camera_fps_history[camera_id]
+            )
+            return avg_fps
+
+        return None
+
+    def get_adaptive_parameters(self, fps: Optional[float]) -> Dict[str, int]:
+        """Calculate adaptive parameters based on actual FPS.
+
+        The idea: Scale parameters by (base_fps / actual_fps) to maintain similar
+        temporal behavior across different frame rates.
+
+        Args:
+            fps: Estimated FPS (None if not yet calculated)
+
+        Returns:
+            Dictionary with adaptive parameters
+        """
+        # Base FPS we optimized for (30 FPS)
+        base_fps = 30.0
+
+        # If FPS not yet available, use default parameters
+        if fps is None or fps < 1.0:
+            return {
+                "tracker_min_hits": settings.tracker_min_hits,
+                "tracker_max_age": settings.tracker_max_age,
+                "confirmation_frames": settings.crossing_confirmation_frames,
+            }
+
+        # Calculate scaling factor
+        scale_factor = base_fps / fps
+
+        # Scale parameters (with reasonable bounds)
+        adaptive_min_hits = max(3, int(settings.tracker_min_hits / scale_factor))
+        adaptive_max_age = max(30, int(settings.tracker_max_age / scale_factor))
+        adaptive_confirmation = max(1, int(settings.crossing_confirmation_frames / scale_factor))
+
+        return {
+            "tracker_min_hits": adaptive_min_hits,
+            "tracker_max_age": adaptive_max_age,
+            "confirmation_frames": adaptive_confirmation,
+            "actual_fps": fps,
+            "scale_factor": scale_factor,
+        }
+
     def configure_line(
         self,
         camera_id: str,
@@ -97,10 +185,20 @@ class VehicleTrackingPipeline:
             config: Line configuration
         """
         try:
+            # Get current FPS for this camera (if available)
+            current_fps = None
+            if camera_id in self.camera_fps_history and len(self.camera_fps_history[camera_id]) >= 5:
+                current_fps = sum(self.camera_fps_history[camera_id]) / len(
+                    self.camera_fps_history[camera_id]
+                )
+
+            # Get adaptive parameters
+            adaptive_params = self.get_adaptive_parameters(current_fps)
+
             self.line_detectors[camera_id] = LineCrossingDetector(
                 config=config,
                 distance_threshold=settings.crossing_distance_threshold,
-                confirmation_frames=settings.crossing_confirmation_frames,
+                confirmation_frames=adaptive_params["confirmation_frames"],
                 hysteresis=settings.crossing_hysteresis,
             )
 
@@ -114,6 +212,8 @@ class VehicleTrackingPipeline:
                 camera_id=camera_id,
                 camera_name=camera_name,
                 area_id=area_id,
+                confirmation_frames=adaptive_params["confirmation_frames"],
+                fps=f"{current_fps:.1f}" if current_fps else "not yet detected",
             )
         except Exception as e:
             logger.error(
@@ -273,6 +373,10 @@ class VehicleTrackingPipeline:
         detections_list = []
         crossing_events = []
 
+        # Update FPS tracking for this camera
+        current_fps = self.update_fps_tracking(camera_id)
+        adaptive_params = self.get_adaptive_parameters(current_fps)
+
         # Production safety: Limit number of cameras
         if len(self.trackers) >= settings.max_cameras and camera_id not in self.trackers:
             logger.error(
@@ -296,15 +400,26 @@ class VehicleTrackingPipeline:
             detections = [box.data.squeeze().tolist() for box in results[0].boxes]
             detections_np = np.array(detections) if detections else np.empty((0, 6))
 
-            # Initialize tracker for this camera if needed
+            # Initialize tracker for this camera if needed (with adaptive parameters)
             if camera_id not in self.trackers:
                 self.trackers[camera_id] = BotSort(
                     reid_weights=Path("Models/osnet_x0_25_msmt17.pt"),
                     device=0 if "cuda" in self.device else "cpu",
                     half=True,
-                    max_age=settings.tracker_max_age,
-                    min_hits=settings.tracker_min_hits,
+                    max_age=adaptive_params["tracker_max_age"],
+                    min_hits=adaptive_params["tracker_min_hits"],
                 )
+
+                # Log adaptive parameters for first initialization
+                if current_fps is not None:
+                    logger.info(
+                        "Initialized tracker with FPS-adaptive parameters",
+                        camera_id=camera_id,
+                        detected_fps=f"{current_fps:.1f}",
+                        min_hits=adaptive_params["tracker_min_hits"],
+                        max_age=adaptive_params["tracker_max_age"],
+                        scale_factor=f"{adaptive_params.get('scale_factor', 1.0):.2f}",
+                    )
 
             tracker = self.trackers[camera_id]
             tracks = tracker.update(detections_np, frame)

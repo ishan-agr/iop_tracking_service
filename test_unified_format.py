@@ -35,8 +35,8 @@ class UnifiedFormatTester:
         camera_id: str = "cam-entrance-001",
         camera_name: str = "Main Entrance Gate",
         area_id: str = "parking-lot-a",
-        nats_url: str = "nats://localhost:4222",
-        kafka_brokers: str = "localhost:9092",
+        nats_url: str = "nats://136.119.107.99:4222",
+        kafka_brokers: str = "136.119.107.99:9092",
     ):
         self.video_path = video_path
         self.camera_id = camera_id
