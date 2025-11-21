@@ -104,14 +104,23 @@ class UnifiedConsumer:
                 camera_key = f"{frame_msg.camera_id}"
 
                 if camera_key not in self._configured_cameras:
+                    # Log RAW masking_line received from NATS
+                    logger.info(
+                        "📥 RAW masking_line received from NATS",
+                        camera_id=frame_msg.camera_id,
+                        raw_masking_line=frame_msg.masking_line
+                    )
+
                     # First time seeing this camera with line config
                     logger.info(
-                        "Configuring line for camera",
+                        "✅ Configuring line for camera (AFTER conversion)",
                         camera_id=frame_msg.camera_id,
                         camera_name=frame_msg.camera_name,
                         area_id=frame_msg.area_id,
-                        line=f"({line_config.line.points[0].x},{line_config.line.points[0].y}) -> ({line_config.line.points[1].x},{line_config.line.points[1].y})",
-                        ingress_side=f"({line_config.ingress_side_point.points[0].x},{line_config.ingress_side_point.points[0].y})"
+                        line_point1=f"({line_config.line.points[0].x:.2f}, {line_config.line.points[0].y:.2f})",
+                        line_point2=f"({line_config.line.points[1].x:.2f}, {line_config.line.points[1].y:.2f})",
+                        ingress_side=f"({line_config.ingress_side_point.points[0].x:.2f}, {line_config.ingress_side_point.points[0].y:.2f})",
+                        coordinate_type="percentage (0-100)" if all(p <= 100 for p in [line_config.line.points[0].x, line_config.line.points[0].y, line_config.line.points[1].x, line_config.line.points[1].y]) else "pixels"
                     )
 
                     # Create a line config message for the callback
