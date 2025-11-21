@@ -88,6 +88,7 @@ class EventProducer:
                 },
                 "frameNumber": event.frame_number,
                 "imagePath": event.image_path,
+                "frameImage": event.frame_base64, 
             }
 
             message_bytes = json.dumps(message).encode("utf-8")

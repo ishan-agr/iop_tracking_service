@@ -10,6 +10,7 @@ from boxmot import BotSort
 from ultralytics import YOLO
 from uuid import uuid4
 from datetime import datetime
+import asyncio
 
 from src.models import (
     Detection,
@@ -344,26 +345,41 @@ class VehicleTrackingPipeline:
 
                     if crossing_result is not None:
                         direction, crossing_point = crossing_result
+                        
+                      
+                        
+                        frame_base64 = None
+                        image_path = object_name 
+                            
+                        try:
+                            is_success, buffer = cv2.imencode(".jpg", frame)
+                            if is_success:
+                                frame_base64 = base64.b64encode(buffer).decode("utf-8")
+                                
+                                image_path = None
+                                # Save vehicle crop on crossing
+                                if settings.save_vehicle_crops:
+                                    bbox_width, bbox_height = x2 - x1, y2 - y1
+                                    pad_x = int(bbox_width * self.padding_percent)
+                                    pad_y = int(bbox_height * self.padding_percent)
+                                    h, w, _ = frame.shape
+                                    x1_pad = max(0, x1 - pad_x)
+                                    y1_pad = max(0, y1 - pad_y)
+                                    x2_pad = min(w, x2 + pad_x)
+                                    y2_pad = min(h, y2 + pad_y)
+                                    cropped_car = frame[y1_pad:y2_pad, x1_pad:x2_pad]
 
-                        # Save vehicle crop on crossing
-                        image_path = None
-                        if settings.save_vehicle_crops:
-                            bbox_width, bbox_height = x2 - x1, y2 - y1
-                            pad_x = int(bbox_width * self.padding_percent)
-                            pad_y = int(bbox_height * self.padding_percent)
-                            h, w, _ = frame.shape
-                            x1_pad = max(0, x1 - pad_x)
-                            y1_pad = max(0, y1 - pad_y)
-                            x2_pad = min(w, x2 + pad_x)
-                            y2_pad = min(h, y2 + pad_y)
-                            cropped_car = frame[y1_pad:y2_pad, x1_pad:x2_pad]
+                                    if await self._is_quality_crop(cropped_car, frame):
+                                        object_name = f"{camera_id}/{area_id}/{direction.value}/{track_id}/{uuid4()}.jpg"
+                                        image_path = await self._save_crop_to_minio(
+                                            cropped_car, object_name
+                                        )
 
-                            if await self._is_quality_crop(cropped_car, frame):
-                                object_name = f"{camera_id}/{area_id}/{direction.value}/{track_id}/{uuid4()}.jpg"
-                                image_path = await self._save_crop_to_minio(
-                                    cropped_car, object_name
-                                )
+                        except Exception as err:
+                            logger.error("Failed to process event image", error=str(err))
 
+                       
+                        
                         # Create crossing event
                         crossing_event = CrossingEvent(
                             track_id=track_id,
@@ -378,6 +394,7 @@ class VehicleTrackingPipeline:
                             crossing_point=crossing_point,
                             frame_number=frame_number,
                             image_path=image_path,
+                            frame_base64=frame_base64
                         )
                         crossing_events.append(crossing_event)
 

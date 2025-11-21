@@ -219,7 +219,8 @@ class CrossingEvent(BaseModel):
     bbox: BoundingBox
     crossing_point: Point
     frame_number: int
-    image_path: Optional[str] = None  # MinIO path to vehicle crop
+    image_path: Optional[str] = None 
+    frame_base64: Optional[str] = None
 
 
 class ServiceStatus(BaseModel):
